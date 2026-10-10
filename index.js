@@ -1,3 +1,4 @@
+JavaScript
 
 const {
   Client,
@@ -12,247 +13,329 @@ const {
 const fs = require("node:fs");
 const path = require("node:path");
 
+// ==================== CONFIG ====================
+
 const TOKEN = process.env.DISCORD_BOT_TOKEN;
 const CLIENT_ID = process.env.DISCORD_CLIENT_ID;
 const GUILD_ID = process.env.DISCORD_GUILD_ID || "";
 const ADMIN_ROLE_ID = process.env.AVL_ADMIN_ROLE_ID || "";
 
+const DATA_FILE = path.join(__dirname, "data.json");
+
+const COLORS = {
+  navy: 0x101B35,
+  gold: 0xD4AF37,
+  red: 0xD64545,
+  green: 0x2ECC71
+};
+
+const DAY = 24 * 60 * 60 * 1000;
+
+// ==================== CHECK CONFIG ====================
+
 if (!TOKEN || !CLIENT_ID) {
-  console.error("Missing DISCORD_BOT_TOKEN or DISCORD_CLIENT_ID.");
+  console.error(
+    "Missing DISCORD_BOT_TOKEN or DISCORD_CLIENT_ID environment variable."
+  );
   process.exit(1);
 }
 
-const DATA_FILE = path.join(__dirname, "data.json");
+// ==================== DATABASE ====================
 
-const DEFAULT_DATA = {
-  players: {},
-  teams: {},
-  companies: {},
-  matches: {},
-  dailyRewards: {},
-  transactions: []
-};
+function emptyDatabase() {
+  return {
+    players: {},
+    teams: {},
+    companies: {},
+    matches: {},
+    rewards: {},
+    transactions: []
+  };
+}
 
-function loadData() {
+function loadDatabase() {
   try {
     if (!fs.existsSync(DATA_FILE)) {
       fs.writeFileSync(
         DATA_FILE,
-        JSON.stringify(DEFAULT_DATA, null, 2)
+        JSON.stringify(emptyDatabase(), null, 2)
       );
     }
 
+    const loaded = JSON.parse(fs.readFileSync(DATA_FILE, "utf8"));
+    const defaults = emptyDatabase();
+
     return {
-      ...structuredClone(DEFAULT_DATA),
-      ...JSON.parse(fs.readFileSync(DATA_FILE, "utf8"))
+      ...defaults,
+      ...loaded,
+      players: loaded.players || {},
+      teams: loaded.teams || {},
+      companies: loaded.companies || {},
+      matches: loaded.matches || {},
+      rewards: loaded.rewards || {},
+      transactions: loaded.transactions || []
     };
   } catch (error) {
-    console.error("Data loading error:", error);
+    console.error("Could not load data.json:", error);
     process.exit(1);
   }
 }
 
-let db = loadData();
+let db = loadDatabase();
 
-function saveData() {
+function saveDatabase() {
   const temporaryFile = DATA_FILE + ".tmp";
-  fs.writeFileSync(temporaryFile, JSON.stringify(db, null, 2));
+
+  fs.writeFileSync(
+    temporaryFile,
+    JSON.stringify(db, null, 2),
+    "utf8"
+  );
+
   fs.renameSync(temporaryFile, DATA_FILE);
 }
 
-const money = value =>
-  "$" + Math.round(Number(value) || 0).toLocaleString("en-US");
+// ==================== HELPERS ====================
 
-const normalize = value => String(value || "").trim().toLowerCase();
+function normalize(value) {
+  return String(value).trim().toLowerCase();
+}
 
-function createEmbed(title, description = "") {
+function money(amount) {
+  return "$" + Math.round(amount).toLocaleString("en-US");
+}
+
+function makeEmbed(title, description, color = COLORS.navy) {
   return new EmbedBuilder()
-    .setColor(0xD4AF37)
-    .setTitle(`『💰』 AVL FINANCE`)
-    .setDescription(`**${title}**\n${description}`)
-    .setFooter({ text: "AVL • Official Finance System" })
+    .setColor(color)
+    .setTitle("『💰』 AVL FINANCE")
+    .setDescription(`**${title}**\n\n${description}`)
+    .setFooter({ text: "AVL Finance System" })
     .setTimestamp();
 }
 
-function addFields(embed, rows) {
-  for (const [name, value] of rows) {
-    embed.addFields({
-      name: String(name).slice(0, 256),
-      value: String(value).slice(0, 1024) || "—",
-      inline: true
-    });
-  }
-  return embed;
-}
-
 function getPlayer(name) {
-  const id = normalize(name);
-  if (!db.players[id]) {
-    db.players[id] = {
-      name: String(name).trim(),
-      balance: 0,
-      team: ""
-    };
-  }
-  return db.players[id];
-}
+  const key = normalize(name);
 
-function getTeam(name) {
-  const id = normalize(name);
-  if (!db.teams[id]) {
-    db.teams[id] = {
+  if (!db.players[key]) {
+    db.players[key] = {
       name: String(name).trim(),
-      president: "",
       balance: 0
     };
   }
-  return db.teams[id];
+
+  return db.players[key];
 }
 
-function isAdmin(interaction) {
-  if (
-    interaction.memberPermissions?.has(
-      PermissionFlagsBits.Administrator
-    )
-  ) return true;
+function getTeam(name, president = "غير محدد") {
+  const key = normalize(name);
 
-  if (
-    ADMIN_ROLE_ID &&
-    interaction.member?.roles?.cache?.has(ADMIN_ROLE_ID)
-  ) return true;
-
-  return false;
-}
-
-async function requireAdmin(interaction) {
-  if (isAdmin(interaction)) return true;
-
-  await interaction.reply({
-    content: "⛔ هاد الأمر خاص بالإدارة فقط.",
-    ephemeral: true
-  });
-
-  return false;
-}
-
-function logTransaction(type, target, amount, actor, details = "") {
-  db.transactions.unshift({
-    type,
-    target,
-    amount,
-    actor,
-    details,
-    date: new Date().toISOString()
-  });
-
-  db.transactions = db.transactions.slice(0, 1000);
-}
-
-function companyRules(price) {
-  if (price >= 3000000 && price < 3500000) {
-    return { dailyIncome: 500000, maxContract: 200000 };
+  if (!db.teams[key]) {
+    db.teams[key] = {
+      name: String(name).trim(),
+      president: String(president).trim(),
+      balance: 0
+    };
+  } else if (president && president !== "غير محدد") {
+    db.teams[key].president = String(president).trim();
   }
 
-  if (price >= 3500000 && price <= 4000000) {
-    return { dailyIncome: 700000, maxContract: 300000 };
+  return db.teams[key];
+}
+
+function getCompany(name) {
+  return db.companies[normalize(name)] || null;
+}
+
+function companyRules(purchasePrice) {
+  if (purchasePrice >= 3000000 && purchasePrice < 3500000) {
+    return {
+      dailyProfit: 500000,
+      maxSponsorship: 200000
+    };
+  }
+
+  if (purchasePrice >= 3500000 && purchasePrice <= 4000000) {
+    return {
+      dailyProfit: 700000,
+      maxSponsorship: 300000
+    };
   }
 
   return null;
 }
 
-function accrueCompany(company) {
+function accrueCompanyProfit(company) {
   const now = Date.now();
-  const last = Number(company.lastAccrualAt || now);
-  const elapsedDays = Math.floor((now - last) / 86400000);
+  const last = Number(company.lastAccrued || now);
+  const fullDays = Math.floor((now - last) / DAY);
 
-  if (elapsedDays > 0) {
-    company.balance += elapsedDays * company.dailyIncome;
-    company.lastAccrualAt = last + elapsedDays * 86400000;
+  if (fullDays > 0) {
+    company.balance += fullDays * company.dailyProfit;
+    company.lastAccrued = last + fullDays * DAY;
   }
 }
 
-const amountOption = (name = "amount", description = "المبلغ") =>
-  option => option
-    .setName(name)
-    .setDescription(description)
-    .setRequired(true)
-    .setMinValue(1);
+function recordTransaction(type, details, amount) {
+  db.transactions.push({
+    type,
+    details,
+    amount,
+    timestamp: Date.now()
+  });
+
+  // Keep the database from growing without limit.
+  if (db.transactions.length > 2000) {
+    db.transactions = db.transactions.slice(-2000);
+  }
+}
+
+function isAdmin(interaction) {
+  if (interaction.memberPermissions?.has(PermissionFlagsBits.Administrator)) {
+    return true;
+  }
+
+  if (!ADMIN_ROLE_ID) {
+    return false;
+  }
+
+  const member = interaction.member;
+  return Boolean(
+    member?.roles?.cache?.has(ADMIN_ROLE_ID) ||
+    member?.roles?.includes?.(ADMIN_ROLE_ID)
+  );
+}
+
+async function replyEmbed(interaction, embed, ephemeral = true) {
+  if (interaction.replied || interaction.deferred) {
+    return interaction.followUp({ embeds: [embed], ephemeral });
+  }
+
+  return interaction.reply({ embeds: [embed], ephemeral });
+}
+
+async function adminOnly(interaction) {
+  if (isAdmin(interaction)) return true;
+
+  await replyEmbed(
+    interaction,
+    makeEmbed(
+      "⛔ ماعندكش الصلاحية",
+      "هاد الأمر مخصص للإدارة فقط."
+    )
+  );
+
+  return false;
+}
+
+// ==================== SLASH COMMANDS ====================
 
 const commands = [
   new SlashCommandBuilder()
     .setName("reward")
-    .setDescription("الحصول على المكافأة اليومية"),
+    .setDescription("احصل على مكافأتك اليومية"),
 
   new SlashCommandBuilder()
     .setName("give-money")
-    .setDescription("إرسال المال إلى لاعب")
+    .setDescription("إضافة المال إلى رصيد لاعب")
     .addStringOption(o =>
-      o.setName("player").setDescription("اسم اللاعب").setRequired(true))
+      o.setName("player")
+        .setDescription("اسم اللاعب")
+        .setRequired(true))
     .addIntegerOption(o =>
-      o.setName("amount").setDescription("المبلغ بالدولار").setRequired(true).setMinValue(1)),
+      o.setName("amount")
+        .setDescription("المبلغ")
+        .setMinValue(1)
+        .setRequired(true)),
 
   new SlashCommandBuilder()
     .setName("give-to-team")
     .setDescription("إضافة المال إلى رصيد فريق")
     .addStringOption(o =>
-      o.setName("team").setDescription("اسم الفريق").setRequired(true))
+      o.setName("team")
+        .setDescription("اسم الفريق")
+        .setRequired(true))
     .addStringOption(o =>
-      o.setName("president").setDescription("اسم رئيس الفريق").setRequired(true))
+      o.setName("president")
+        .setDescription("اسم رئيس الفريق")
+        .setRequired(true))
     .addIntegerOption(o =>
-      o.setName("amount").setDescription("المبلغ بالدولار").setRequired(true).setMinValue(1)),
+      o.setName("amount")
+        .setDescription("المبلغ")
+        .setMinValue(1)
+        .setRequired(true)),
 
   new SlashCommandBuilder()
     .setName("give-to-player")
-    .setDescription("إضافة المال للاعب داخل فريقه")
+    .setDescription("تحويل المال من الفريق إلى لاعب")
     .addStringOption(o =>
-      o.setName("player").setDescription("اسم اللاعب").setRequired(true))
+      o.setName("player")
+        .setDescription("اسم اللاعب")
+        .setRequired(true))
     .addStringOption(o =>
-      o.setName("team").setDescription("اسم الفريق").setRequired(true))
+      o.setName("team")
+        .setDescription("اسم الفريق الذي سيدفع")
+        .setRequired(true))
     .addIntegerOption(o =>
-      o.setName("amount").setDescription("المبلغ بالدولار").setRequired(true).setMinValue(1)),
+      o.setName("amount")
+        .setDescription("المبلغ")
+        .setMinValue(1)
+        .setRequired(true)),
 
   new SlashCommandBuilder()
     .setName("create-company")
-    .setDescription("إنشاء شركة جديدة")
+    .setDescription("تسجيل شركة جديدة")
     .addStringOption(o =>
-      o.setName("company-name").setDescription("اسم الشركة").setRequired(true))
+      o.setName("company-name")
+        .setDescription("اسم الشركة")
+        .setRequired(true))
     .addIntegerOption(o =>
-      o.setName("purchase-price").setDescription("ثمن شراء الشركة").setRequired(true)
-        .setMinValue(3000000).setMaxValue(4000000)),
+      o.setName("purchase-price")
+        .setDescription("ثمن شراء الشركة: من 3 إلى 4 ملايين")
+        .setMinValue(3000000)
+        .setMaxValue(4000000)
+        .setRequired(true)),
 
   new SlashCommandBuilder()
     .setName("view-all-companies")
-    .setDescription("عرض جميع الشركات ومعلوماتها"),
+    .setDescription("عرض جميع الشركات وأرباحها"),
 
   new SlashCommandBuilder()
     .setName("contracting-with-company")
-    .setDescription("تسجيل عقد رعاية مع شركة")
+    .setDescription("إبرام عقد رعاية بين شركة وفريق")
     .addStringOption(o =>
-      o.setName("company").setDescription("اسم الشركة").setRequired(true))
+      o.setName("company")
+        .setDescription("اسم الشركة")
+        .setRequired(true))
     .addStringOption(o =>
-      o.setName("team").setDescription("اسم الفريق").setRequired(true))
+      o.setName("team")
+        .setDescription("اسم الفريق")
+        .setRequired(true))
     .addIntegerOption(o =>
-      o.setName("amount").setDescription("مبلغ العقد بالدولار").setRequired(true)
-        .addChoices(
-          { name: "$50,000", value: 50000 },
-          { name: "$100,000", value: 100000 },
-          { name: "$150,000", value: 150000 },
-          { name: "$200,000", value: 200000 },
-          { name: "$250,000", value: 250000 },
-          { name: "$300,000", value: 300000 }
-        )),
+      o.setName("amount")
+        .setDescription("قيمة العقد")
+        .setMinValue(1)
+        .setRequired(true)),
 
   new SlashCommandBuilder()
     .setName("match-reward")
-    .setDescription("تسجيل نتيجة المباراة وصرف مكافآت الفريقين")
+    .setDescription("تسجيل نتيجة مباراة وصرف مكافأة الفريق")
     .addStringOption(o =>
-      o.setName("match").setDescription("اسم المباراة أو رقمها").setRequired(true))
+      o.setName("match")
+        .setDescription("اسم المباراة أو رقم الجولة")
+        .setRequired(true))
     .addStringOption(o =>
-      o.setName("team-1").setDescription("اسم الفريق الأول").setRequired(true))
+      o.setName("team-1")
+        .setDescription("اسم الفريق الأول")
+        .setRequired(true))
     .addStringOption(o =>
-      o.setName("team-2").setDescription("اسم الفريق الثاني").setRequired(true))
+      o.setName("team-2")
+        .setDescription("اسم الفريق الثاني")
+        .setRequired(true))
     .addStringOption(o =>
-      o.setName("result").setDescription("نتيجة المباراة").setRequired(true)
+      o.setName("result")
+        .setDescription("نتيجة المباراة")
+        .setRequired(true)
         .addChoices(
           { name: "فوز الفريق الأول", value: "team1" },
           { name: "فوز الفريق الثاني", value: "team2" },
@@ -261,477 +344,59 @@ const commands = [
 
   new SlashCommandBuilder()
     .setName("set-mvp")
-    .setDescription("تحديد أفضل لاعب في المباراة")
+    .setDescription("تحديد أفضل لاعب في مباراة وصرف مكافأته")
     .addStringOption(o =>
-      o.setName("match").setDescription("اسم المباراة أو رقمها").setRequired(true))
+      o.setName("match")
+        .setDescription("اسم المباراة المسجلة")
+        .setRequired(true))
     .addStringOption(o =>
-      o.setName("player").setDescription("اسم اللاعب").setRequired(true))
+      o.setName("player")
+        .setDescription("اسم أفضل لاعب")
+        .setRequired(true))
     .addStringOption(o =>
-      o.setName("team").setDescription("فريق اللاعب").setRequired(true)),
+      o.setName("team")
+        .setDescription("الفريق الذي ينتمي إليه اللاعب")
+        .setRequired(true)),
 
   new SlashCommandBuilder()
     .setName("team-balance")
-    .setDescription("عرض رصيد الفريق")
+    .setDescription("عرض رصيد فريق")
     .addStringOption(o =>
-      o.setName("team").setDescription("اسم الفريق").setRequired(true)),
+      o.setName("team")
+        .setDescription("اسم الفريق")
+        .setRequired(true)),
 
   new SlashCommandBuilder()
     .setName("player-balance")
-    .setDescription("عرض رصيد اللاعب")
+    .setDescription("عرض رصيد لاعب")
     .addStringOption(o =>
-      o.setName("player").setDescription("اسم اللاعب").setRequired(true)),
+      o.setName("player")
+        .setDescription("اسم اللاعب")
+        .setRequired(true)),
 
   new SlashCommandBuilder()
     .setName("company-balance")
-    .setDescription("عرض رصيد الشركة")
+    .setDescription("عرض رصيد شركة")
     .addStringOption(o =>
-      o.setName("company").setDescription("اسم الشركة").setRequired(true)),
+      o.setName("company")
+        .setDescription("اسم الشركة")
+        .setRequired(true)),
 
   new SlashCommandBuilder()
     .setName("rewards-match")
     .setDescription("عرض قوانين مكافآت المباريات")
 ].map(command => command.toJSON());
 
+// ==================== DISCORD CLIENT ====================
+
 const client = new Client({
   intents: [GatewayIntentBits.Guilds]
 });
 
-async function handleCommand(interaction) {
-  const command = interaction.commandName;
-
-  if ([
-    "give-money",
-    "give-to-team",
-    "give-to-player",
-    "create-company",
-    "contracting-with-company",
-    "match-reward",
-    "set-mvp"
-  ].includes(command)) {
-    if (!(await requireAdmin(interaction))) return;
-  }
-
-  if (command === "reward") {
-    const id = interaction.user.id;
-    const last = Number(db.dailyRewards[id] || 0);
-    const remaining = 86400000 - (Date.now() - last);
-
-    if (remaining > 0) {
-      const hours = Math.floor(remaining / 3600000);
-      const minutes = Math.ceil((remaining % 3600000) / 60000);
-
-      return interaction.reply({
-        embeds: [createEmbed(
-          "⏳ المكافأة اليومية",
-          `لقد حصلت على مكافأتك بالفعل.\nيمكنك العودة بعد **${hours} ساعة و${minutes} دقيقة**.`
-        )],
-        ephemeral: true
-      });
-    }
-
-    const player = getPlayer(interaction.user.username);
-    player.balance += 20;
-    db.dailyRewards[id] = Date.now();
-
-    logTransaction("Daily reward", player.name, 20, interaction.user.tag);
-    saveData();
-
-    return interaction.reply({
-      embeds: [addFields(createEmbed("🎁 المكافأة اليومية", "تمت إضافة مكافأتك بنجاح!"), [
-        ["👤 اللاعب", player.name],
-        ["💵 المكافأة", money(20)],
-        ["💰 الرصيد الجديد", money(player.balance)]
-      ])]
-    });
-  }
-
-  if (command === "give-money") {
-    const name = interaction.options.getString("player");
-    const amount = interaction.options.getInteger("amount");
-    const player = getPlayer(name);
-    player.balance += amount;
-
-    logTransaction("Give money", player.name, amount, interaction.user.tag);
-    saveData();
-
-    return interaction.reply({
-      embeds: [addFields(createEmbed("💸 تحويل مالي", "تمت إضافة المبلغ للاعب."), [
-        ["👤 اللاعب", player.name],
-        ["💵 المبلغ", money(amount)],
-        ["💰 الرصيد الجديد", money(player.balance)]
-      ])]
-    });
-  }
-
-  if (command === "give-to-team") {
-    const name = interaction.options.getString("team");
-    const president = interaction.options.getString("president");
-    const amount = interaction.options.getInteger("amount");
-    const team = getTeam(name);
-
-    team.president = president;
-    team.balance += amount;
-
-    logTransaction("Give to team", team.name, amount, interaction.user.tag, president);
-    saveData();
-
-    return interaction.reply({
-      embeds: [addFields(createEmbed("🏆 تمويل فريق", "تم تحديث رصيد الفريق بنجاح."), [
-        ["⚽ الفريق", team.name],
-        ["👔 الرئيس", president],
-        ["💵 المبلغ", money(amount)],
-        ["💰 الرصيد الجديد", money(team.balance)]
-      ])]
-    });
-  }
-
-  if (command === "give-to-player") {
-    const name = interaction.options.getString("player");
-    const teamName = interaction.options.getString("team");
-    const amount = interaction.options.getInteger("amount");
-    const player = getPlayer(name);
-
-    player.team = teamName;
-    player.balance += amount;
-
-    logTransaction("Give to player", player.name, amount, interaction.user.tag, teamName);
-    saveData();
-
-    return interaction.reply({
-      embeds: [addFields(createEmbed("👤 مكافأة لاعب", "تم تحديث رصيد اللاعب."), [
-        ["👤 اللاعب", player.name],
-        ["⚽ الفريق", teamName],
-        ["💵 المبلغ", money(amount)],
-        ["💰 الرصيد الجديد", money(player.balance)]
-      ])]
-    });
-  }
-
-  if (command === "create-company") {
-    const name = interaction.options.getString("company-name").trim();
-    const price = interaction.options.getInteger("purchase-price");
-    const id = normalize(name);
-
-    if (db.companies[id]) {
-      return interaction.reply({
-        content: "⚠️ كاينة شركة بهاد الاسم من قبل.",
-        ephemeral: true
-      });
-    }
-
-    const rules = companyRules(price);
-    if (!rules) {
-      return interaction.reply({
-        content: "❌ ثمن الشركة خاصو يكون بين $3,000,000 و$4,000,000.",
-        ephemeral: true
-      });
-    }
-
-    db.companies[id] = {
-      name,
-      owner: interaction.user.tag,
-      purchasePrice: price,
-      balance: 0,
-      dailyIncome: rules.dailyIncome,
-      maxContract: rules.maxContract,
-      lastAccrualAt: Date.now(),
-      contracts: []
-    };
-
-    saveData();
-
-    return interaction.reply({
-      embeds: [addFields(createEmbed("🏢 تم إنشاء الشركة", "تم تسجيل الشركة في نظام AVL Finance."), [
-        ["🏢 الشركة", name],
-        ["👤 المالك", interaction.user.tag],
-        ["💳 ثمن الشراء", money(price)],
-        ["📈 الأرباح اليومية", money(rules.dailyIncome)],
-        ["🤝 الحد الأقصى للرعاية", money(rules.maxContract)]
-      ])]
-    });
-  }
-
-  if (command === "view-all-companies") {
-    const companies = Object.values(db.companies);
-
-    for (const company of companies) accrueCompany(company);
-    saveData();
-
-    if (!companies.length) {
-      return interaction.reply({
-        embeds: [createEmbed("🏢 الشركات", "مازال ما تسجلات حتى شركة.")]
-      });
-    }
-
-    const embed = createEmbed("🏢 قائمة الشركات", `عدد الشركات: **${companies.length}**`);
-
-    for (const company of companies.slice(0, 25)) {
-      embed.addFields({
-        name: `🏢 ${company.name}`,
-        value:
-          `👤 المالك: ${company.owner}\n` +
-          `💰 الرصيد: ${money(company.balance)}\n` +
-          `📈 الأرباح اليومية: ${money(company.dailyIncome)}\n` +
-          `🤝 أقصى رعاية: ${money(company.maxContract)}`,
-        inline: false
-      });
-    }
-
-    return interaction.reply({ embeds: [embed] });
-  }
-
-  if (command === "contracting-with-company") {
-    const companyName = interaction.options.getString("company");
-    const teamName = interaction.options.getString("team");
-    const amount = interaction.options.getInteger("amount");
-    const company = db.companies[normalize(companyName)];
-
-    if (!company) {
-      return interaction.reply({
-        content: "❌ هاد الشركة ما كايناش فالسجل.",
-        ephemeral: true
-      });
-    }
-
-    accrueCompany(company);
-
-    if (amount > company.maxContract) {
-      return interaction.reply({
-        content: `❌ الحد الأقصى لرعاية هاد الشركة هو ${money(company.maxContract)}.`,
-        ephemeral: true
-      });
-    }
-
-    const team = getTeam(teamName);
-    company.balance -= amount;
-    team.balance += amount;
-
-    company.contracts.push({
-      team: team.name,
-      amount,
-      date: new Date().toISOString()
-    });
-
-    logTransaction("Company sponsorship", company.name, amount, interaction.user.tag, team.name);
-    saveData();
-
-    return interaction.reply({
-      embeds: [addFields(createEmbed("🤝 عقد رعاية", "تم تسجيل العقد وتحويل المبلغ."), [
-        ["🏢 الشركة", company.name],
-        ["⚽ الفريق", team.name],
-        ["💵 مبلغ العقد", money(amount)],
-        ["💰 رصيد الشركة", money(company.balance)],
-        ["🏆 رصيد الفريق", money(team.balance)]
-      ])]
-    });
-  }
-
-  if (command === "match-reward") {
-    const matchName = interaction.options.getString("match").trim();
-    const team1Name = interaction.options.getString("team-1").trim();
-    const team2Name = interaction.options.getString("team-2").trim();
-    const result = interaction.options.getString("result");
-    const matchId = normalize(matchName);
-
-    if (normalize(team1Name) === normalize(team2Name)) {
-      return interaction.reply({
-        content: "❌ خاصك تدخل جوج فرق مختلفين.",
-        ephemeral: true
-      });
-    }
-
-    if (db.matches[matchId]) {
-      return interaction.reply({
-        content: "⚠️ هاد المباراة مسجلة من قبل. ما يمكنش تصرف المكافأة مرتين.",
-        ephemeral: true
-      });
-    }
-
-    const team1 = getTeam(team1Name);
-    const team2 = getTeam(team2Name);
-    let reward1 = 0;
-    let reward2 = 0;
-    let resultText = "";
-
-    if (result === "team1") {
-      reward1 = 100000;
-      resultText = `🏆 الفائز: ${team1.name}`;
-    } else if (result === "team2") {
-      reward2 = 100000;
-      resultText = `🏆 الفائز: ${team2.name}`;
-    } else {
-      reward1 = 50000;
-      reward2 = 50000;
-      resultText = "🤝 انتهت المباراة بالتعادل";
-    }
-
-    team1.balance += reward1;
-    team2.balance += reward2;
-
-    db.matches[matchId] = {
-      name: matchName,
-      team1: team1.name,
-      team2: team2.name,
-      result,
-      reward1,
-      reward2,
-      mvpSet: false,
-      date: new Date().toISOString()
-    };
-
-    logTransaction("Match reward", team1.name, reward1, interaction.user.tag, matchName);
-    logTransaction("Match reward", team2.name, reward2, interaction.user.tag, matchName);
-    saveData();
-
-    return interaction.reply({
-      embeds: [addFields(createEmbed("⚽ مكافآت المباراة", resultText), [
-        ["🏟️ المباراة", matchName],
-        ["📊 النتيجة", result === "draw" ? "تعادل" : "تم تسجيل الفوز"],
-        [`⚽ ${team1.name}`, money(reward1)],
-        [`⚽ ${team2.name}`, money(reward2)],
-        ["💰 رصيد الفريق الأول", money(team1.balance)],
-        ["💰 رصيد الفريق الثاني", money(team2.balance)]
-      ])]
-    });
-  }
-
-  if (command === "set-mvp") {
-    const matchName = interaction.options.getString("match").trim();
-    const playerName = interaction.options.getString("player").trim();
-    const teamName = interaction.options.getString("team").trim();
-    const match = db.matches[normalize(matchName)];
-
-    if (!match) {
-      return interaction.reply({
-        content: "❌ المباراة ما مسجلةش. استعمل /match-reward أولاً.",
-        ephemeral: true
-      });
-    }
-
-    if (match.mvpSet) {
-      return interaction.reply({
-        content: "⚠️ تم صرف مكافأة MVP لهاد المباراة من قبل.",
-        ephemeral: true
-      });
-    }
-
-    if (
-      normalize(teamName) !== normalize(match.team1) &&
-      normalize(teamName) !== normalize(match.team2)
-    ) {
-      return interaction.reply({
-        content: "❌ فريق اللاعب ما مشاركش فهاد المباراة.",
-        ephemeral: true
-      });
-    }
-
-    const mvpReward = match.result === "draw"
-      ? 30000
-      : ((match.result === "team1" && normalize(teamName) === normalize(match.team1)) ||
-         (match.result === "team2" && normalize(teamName) === normalize(match.team2)))
-        ? 50000
-        : 20000;
-
-    const player = getPlayer(playerName);
-    player.team = teamName;
-    player.balance += mvpReward;
-    match.mvpSet = true;
-    match.mvp = playerName;
-    match.mvpReward = mvpReward;
-
-    logTransaction("MVP reward", player.name, mvpReward, interaction.user.tag, matchName);
-    saveData();
-
-    return interaction.reply({
-      embeds: [addFields(createEmbed("⭐ أفضل لاعب في المباراة", "تم تسجيل MVP وصرف المكافأة."), [
-        ["🏟️ المباراة", match.name],
-        ["⭐ اللاعب", player.name],
-        ["⚽ الفريق", teamName],
-        ["💵 مكافأة MVP", money(mvpReward)],
-        ["💰 رصيد اللاعب", money(player.balance)]
-      ])]
-    });
-  }
-
-  if (command === "team-balance") {
-    const name = interaction.options.getString("team");
-    const team = getTeam(name);
-    saveData();
-
-    return interaction.reply({
-      embeds: [addFields(createEmbed("🏆 رصيد الفريق"), [
-        ["⚽ الفريق", team.name],
-        ["👔 الرئيس", team.president || "غير مسجل"],
-        ["💰 الرصيد", money(team.balance)]
-      ])]
-    });
-  }
-
-  if (command === "player-balance") {
-    const name = interaction.options.getString("player");
-    const player = getPlayer(name);
-    saveData();
-
-    return interaction.reply({
-      embeds: [addFields(createEmbed("👤 رصيد اللاعب"), [
-        ["👤 اللاعب", player.name],
-        ["⚽ الفريق", player.team || "غير مسجل"],
-        ["💰 الرصيد", money(player.balance)]
-      ])]
-    });
-  }
-
-  if (command === "company-balance") {
-    const name = interaction.options.getString("company");
-    const company = db.companies[normalize(name)];
-
-    if (!company) {
-      return interaction.reply({
-        content: "❌ الشركة غير موجودة.",
-        ephemeral: true
-      });
-    }
-
-    accrueCompany(company);
-    saveData();
-
-    return interaction.reply({
-      embeds: [addFields(createEmbed("🏢 رصيد الشركة"), [
-        ["🏢 الشركة", company.name],
-        ["👤 المالك", company.owner],
-        ["💰 الرصيد", money(company.balance)],
-        ["📈 الأرباح اليومية", money(company.dailyIncome)],
-        ["🤝 أقصى رعاية", money(company.maxContract)]
-      ])]
-    });
-  }
-
-  if (command === "rewards-match") {
-    const embed = createEmbed(
-      "⚽ قوانين مكافآت المباريات",
-      "القوانين الرسمية لمكافآت AVL Finance"
-    );
-
-    embed.addFields(
-      { name: "🏆 فوز الفريق", value: money(100000), inline: true },
-      { name: "🤝 تعادل كل فريق", value: money(50000), inline: true },
-      { name: "❌ الفريق الخاسر", value: money(0), inline: true },
-      { name: "⭐ MVP عند الفوز", value: money(50000), inline: true },
-      { name: "⭐ MVP عند التعادل", value: money(30000), inline: true },
-      { name: "⭐ MVP عند الخسارة", value: money(20000), inline: true }
-    );
-
-    embed.addFields({
-      name: "📌 ملاحظة",
-      value: "لا توجد مكافآت إضافية على الأهداف."
-    });
-
-    return interaction.reply({ embeds: [embed] });
-  }
-}
+// ==================== REGISTER COMMANDS ====================
 
 client.once("ready", async () => {
-  console.log(`Logged in as ${client.user.tag}`);
+  console.log(`AVL Finance Bot is online as ${client.user.tag}`);
 
   try {
     const rest = new REST({ version: "10" }).setToken(TOKEN);
@@ -741,42 +406,668 @@ client.once("ready", async () => {
         Routes.applicationGuildCommands(CLIENT_ID, GUILD_ID),
         { body: commands }
       );
-      console.log("Slash commands registered for the configured server.");
+
+      console.log(`Registered ${commands.length} guild commands.`);
     } else {
       await rest.put(
         Routes.applicationCommands(CLIENT_ID),
         { body: commands }
       );
-      console.log("Global slash commands registered. They may take time to appear.");
+
+      console.log(`Registered ${commands.length} global commands.`);
+      console.log("Global commands may take time to appear.");
     }
   } catch (error) {
     console.error("Command registration failed:", error);
   }
 });
 
+// ==================== COMMAND HANDLER ====================
+
 client.on("interactionCreate", async interaction => {
   if (!interaction.isChatInputCommand()) return;
 
+  const command = interaction.commandName;
+
   try {
-    await handleCommand(interaction);
+    // ---------- DAILY REWARD ----------
+
+    if (command === "reward") {
+      const userId = interaction.user.id;
+      const now = Date.now();
+      const lastReward = Number(db.rewards[userId] || 0);
+      const remaining = DAY - (now - lastReward);
+
+      if (lastReward && remaining > 0) {
+        const hours = Math.floor(remaining / (60 * 60 * 1000));
+        const minutes = Math.ceil((remaining % (60 * 60 * 1000)) / 60000);
+
+        return replyEmbed(
+          interaction,
+          makeEmbed(
+            "⏳ المكافأة اليومية",
+            `لقد حصلت على مكافأتك من قبل.\nيمكنك المحاولة بعد **${hours} ساعة و${minutes} دقيقة**.`
+          )
+        );
+      }
+
+      const player = getPlayer(interaction.user.username);
+      player.balance += 20;
+      db.rewards[userId] = now;
+
+      recordTransaction(
+        "daily-reward",
+        interaction.user.username,
+        20
+      );
+
+      saveDatabase();
+
+      return replyEmbed(
+        interaction,
+        makeEmbed(
+          "🎁 تم استلام المكافأة",
+          `اللاعب: **${interaction.user.username}**\nالمكافأة: **${money(20)}**\nالرصيد الجديد: **${money(player.balance)}**`,
+          COLORS.green
+        )
+      );
+    }
+
+    // ---------- GIVE MONEY ----------
+
+    if (command === "give-money") {
+      if (!(await adminOnly(interaction))) return;
+
+      const name = interaction.options.getString("player");
+      const amount = interaction.options.getInteger("amount");
+      const player = getPlayer(name);
+
+      player.balance += amount;
+
+      recordTransaction("give-money", name, amount);
+      saveDatabase();
+
+      return replyEmbed(
+        interaction,
+        makeEmbed(
+          "💸 تم تحويل المال",
+          `اللاعب: **${player.name}**\nالمبلغ: **${money(amount)}**\nالرصيد الجديد: **${money(player.balance)}**`,
+          COLORS.green
+        )
+      );
+    }
+
+    // ---------- GIVE TO TEAM ----------
+
+    if (command === "give-to-team") {
+      if (!(await adminOnly(interaction))) return;
+
+      const name = interaction.options.getString("team");
+      const president = interaction.options.getString("president");
+      const amount = interaction.options.getInteger("amount");
+      const team = getTeam(name, president);
+
+      team.balance += amount;
+
+      recordTransaction("give-to-team", team.name, amount);
+      saveDatabase();
+
+      return replyEmbed(
+        interaction,
+        makeEmbed(
+          "🏆 تم تمويل الفريق",
+          `الفريق: **${team.name}**\nالرئيس: **${team.president}**\nالمبلغ: **${money(amount)}**\nالرصيد: **${money(team.balance)}**`,
+          COLORS.green
+        )
+      );
+    }
+
+    // ---------- GIVE TO PLAYER ----------
+
+    if (command === "give-to-player") {
+      if (!(await adminOnly(interaction))) return;
+
+      const playerName = interaction.options.getString("player");
+      const teamName = interaction.options.getString("team");
+      const amount = interaction.options.getInteger("amount");
+
+      const team = db.teams[normalize(teamName)];
+
+      if (!team) {
+        return replyEmbed(
+          interaction,
+          makeEmbed("❌ الفريق غير موجود", "سجّل رصيد الفريق أولاً باستعمال `/give-to-team`.")
+        );
+      }
+
+      if (team.balance < amount) {
+        return replyEmbed(
+          interaction,
+          makeEmbed(
+            "❌ رصيد الفريق غير كافٍ",
+            `رصيد الفريق: **${money(team.balance)}**\nالمبلغ المطلوب: **${money(amount)}**`
+          )
+        );
+      }
+
+      const player = getPlayer(playerName);
+
+      team.balance -= amount;
+      player.balance += amount;
+
+      recordTransaction(
+        "team-to-player",
+        `${team.name} -> ${player.name}`,
+        amount
+      );
+
+      saveDatabase();
+
+      return replyEmbed(
+        interaction,
+        makeEmbed(
+          "🤝 تم تحويل المال للاعب",
+          `الفريق: **${team.name}**\nاللاعب: **${player.name}**\nالمبلغ: **${money(amount)}**\nرصيد الفريق: **${money(team.balance)}**\nرصيد اللاعب: **${money(player.balance)}**`,
+          COLORS.green
+        )
+      );
+    }
+
+    // ---------- CREATE COMPANY ----------
+
+    if (command === "create-company") {
+      if (!(await adminOnly(interaction))) return;
+
+      const name = interaction.options.getString("company-name").trim();
+      const price = interaction.options.getInteger("purchase-price");
+      const key = normalize(name);
+
+      if (db.companies[key]) {
+        return replyEmbed(
+          interaction,
+          makeEmbed("❌ الشركة مسجلة من قبل", "اختَر اسماً مختلفاً للشركة.")
+        );
+      }
+
+      const rules = companyRules(price);
+
+      if (!rules) {
+        return replyEmbed(
+          interaction,
+          makeEmbed("❌ ثمن غير صالح", "ثمن الشركة يجب أن يكون بين 3,000,000 و4,000,000 دولار.")
+        );
+      }
+
+      db.companies[key] = {
+        name,
+        owner: interaction.user.tag,
+        purchasePrice: price,
+        balance: 0,
+        dailyProfit: rules.dailyProfit,
+        maxSponsorship: rules.maxSponsorship,
+        lastAccrued: Date.now(),
+        contracts: []
+      };
+
+      recordTransaction("create-company", name, price);
+      saveDatabase();
+
+      return replyEmbed(
+        interaction,
+        makeEmbed(
+          "🏢 تم تسجيل الشركة",
+          `الشركة: **${name}**\nالمالك المسجل: **${interaction.user.tag}**\nثمن الشراء: **${money(price)}**\nالأرباح اليومية: **${money(rules.dailyProfit)}**\nأقصى عقد رعاية: **${money(rules.maxSponsorship)}**\nرصيد الشركة الأولي: **${money(0)}**`,
+          COLORS.green
+        )
+      );
+    }
+
+    // ---------- VIEW ALL COMPANIES ----------
+
+    if (command === "view-all-companies") {
+      for (const company of Object.values(db.companies)) {
+        accrueCompanyProfit(company);
+      }
+
+      saveDatabase();
+
+      const companies = Object.values(db.companies);
+
+      if (companies.length === 0) {
+        return replyEmbed(
+          interaction,
+          makeEmbed("🏢 الشركات", "مازال ما تسجلات حتى شركة.")
+        );
+      }
+
+      const lines = companies.map((company, index) =>
+        `**${index + 1}. ${company.name}**\n` +
+        `المالك: ${company.owner}\n` +
+        `الرصيد: ${money(company.balance)}\n` +
+        `الربح اليومي: ${money(company.dailyProfit)}\n` +
+        `أقصى رعاية: ${money(company.maxSponsorship)}`
+      );
+
+      const pages = [];
+      let current = "";
+
+      for (const line of lines) {
+        if ((current + "\n\n" + line).length > 3800) {
+          pages.push(current);
+          current = line;
+        } else {
+          current = current ? current + "\n\n" + line : line;
+        }
+      }
+
+      if (current) pages.push(current);
+
+      await replyEmbed(
+        interaction,
+        makeEmbed(
+          `🏢 جميع الشركات (${companies.length})`,
+          pages[0]
+        )
+      );
+
+      for (let i = 1; i < pages.length; i++) {
+        await interaction.followUp({
+          embeds: [
+            makeEmbed(`🏢 الشركات — صفحة ${i + 1}`, pages[i])
+          ],
+          ephemeral: true
+        });
+      }
+
+      return;
+    }
+
+    // ---------- COMPANY CONTRACT ----------
+
+    if (command === "contracting-with-company") {
+      if (!(await adminOnly(interaction))) return;
+
+      const companyName = interaction.options.getString("company");
+      const teamName = interaction.options.getString("team");
+      const amount = interaction.options.getInteger("amount");
+
+      const company = getCompany(companyName);
+
+      if (!company) {
+        return replyEmbed(
+          interaction,
+          makeEmbed("❌ الشركة غير موجودة", "تأكد من اسم الشركة أو سجّلها أولاً.")
+        );
+      }
+
+      accrueCompanyProfit(company);
+
+      if (amount > company.maxSponsorship) {
+        saveDatabase();
+
+        return replyEmbed(
+          interaction,
+          makeEmbed(
+            "❌ قيمة العقد كبيرة",
+            `أقصى قيمة للرعاية من هذه الشركة هي **${money(company.maxSponsorship)}**.`
+          )
+        );
+      }
+
+      if (company.balance < amount) {
+        saveDatabase();
+
+        return replyEmbed(
+          interaction,
+          makeEmbed(
+            "❌ رصيد الشركة غير كافٍ",
+            `رصيد الشركة: **${money(company.balance)}**\nقيمة العقد: **${money(amount)}**\nالأرباح اليومية: **${money(company.dailyProfit)}**`
+          )
+        );
+      }
+
+      const team = getTeam(teamName);
+
+      company.balance -= amount;
+      team.balance += amount;
+
+      company.contracts.push({
+        team: team.name,
+        amount,
+        date: Date.now()
+      });
+
+      recordTransaction(
+        "company-contract",
+        `${company.name} -> ${team.name}`,
+        amount
+      );
+
+      saveDatabase();
+
+      return replyEmbed(
+        interaction,
+        makeEmbed(
+          "📝 تم إبرام عقد الرعاية",
+          `الشركة: **${company.name}**\nالفريق: **${team.name}**\nقيمة العقد: **${money(amount)}**\nرصيد الشركة: **${money(company.balance)}**\nرصيد الفريق: **${money(team.balance)}**`,
+          COLORS.green
+        )
+      );
+    }
+
+    // ---------- MATCH REWARD ----------
+
+    if (command === "match-reward") {
+      if (!(await adminOnly(interaction))) return;
+
+      const matchName = interaction.options.getString("match").trim();
+      const team1Name = interaction.options.getString("team-1").trim();
+      const team2Name = interaction.options.getString("team-2").trim();
+      const result = interaction.options.getString("result");
+      const matchKey = normalize(matchName);
+
+      if (normalize(team1Name) === normalize(team2Name)) {
+        return replyEmbed(
+          interaction,
+          makeEmbed("❌ خطأ", "خاص الفريق الأول يكون مختلف على الفريق الثاني.")
+        );
+      }
+
+      if (db.matches[matchKey]) {
+        return replyEmbed(
+          interaction,
+          makeEmbed(
+            "❌ المباراة مسجلة من قبل",
+            "استعمل اسماً مختلفاً للمباراة حتى ما تتصرفش المكافآت مرتين."
+          )
+        );
+      }
+
+      const team1 = getTeam(team1Name);
+      const team2 = getTeam(team2Name);
+
+      let team1Reward = 0;
+      let team2Reward = 0;
+      let resultText = "";
+
+      if (result === "team1") {
+        team1Reward = 100000;
+        resultText = `الفائز: **${team1.name}**`;
+      } else if (result === "team2") {
+        team2Reward = 100000;
+        resultText = `الفائز: **${team2.name}**`;
+      } else if (result === "draw") {
+        team1Reward = 50000;
+        team2Reward = 50000;
+        resultText = "النتيجة: **تعادل**";
+      } else {
+        return replyEmbed(
+          interaction,
+          makeEmbed("❌ نتيجة غير صالحة", "اختار فوز الفريق الأول أو الثاني أو التعادل.")
+        );
+      }
+
+      team1.balance += team1Reward;
+      team2.balance += team2Reward;
+
+      db.matches[matchKey] = {
+        name: matchName,
+        team1: team1.name,
+        team2: team2.name,
+        result,
+        team1Reward,
+        team2Reward,
+        mvpPaid: false,
+        createdAt: Date.now()
+      };
+
+      recordTransaction(
+        "match-reward",
+        `${matchName}: ${team1.name} / ${team2.name}`,
+        team1Reward + team2Reward
+      );
+
+      saveDatabase();
+
+      return replyEmbed(
+        interaction,
+        makeEmbed(
+          "⚽ تم تسجيل نتيجة المباراة",
+          `المباراة: **${matchName}**\n` +
+          `${team1.name}: **${money(team1Reward)}**\n` +
+          `${team2.name}: **${money(team2Reward)}**\n` +
+          `${resultText}\n\n` +
+          `رصيد ${team1.name}: **${money(team1.balance)}**\n` +
+          `رصيد ${team2.name}: **${money(team2.balance)}**`,
+          COLORS.green
+        )
+      );
+    }
+
+    // ---------- SET MVP ----------
+
+    if (command === "set-mvp") {
+      if (!(await adminOnly(interaction))) return;
+
+      const matchName = interaction.options.getString("match");
+      const playerName = interaction.options.getString("player");
+      const teamName = interaction.options.getString("team");
+
+      const match = db.matches[normalize(matchName)];
+
+      if (!match) {
+        return replyEmbed(
+          interaction,
+          makeEmbed(
+            "❌ المباراة غير موجودة",
+            "سجّل نتيجة المباراة أولاً باستعمال `/match-reward`."
+          )
+        );
+      }
+
+      if (match.mvpPaid) {
+        return replyEmbed(
+          interaction,
+          makeEmbed(
+            "❌ تم صرف مكافأة MVP",
+            "تم صرف مكافأة أفضل لاعب في هذه المباراة من قبل."
+          )
+        );
+      }
+
+      const teamKey = normalize(teamName);
+      const team1Key = normalize(match.team1);
+      const team2Key = normalize(match.team2);
+
+      if (teamKey !== team1Key && teamKey !== team2Key) {
+        return replyEmbed(
+          interaction,
+          makeEmbed(
+            "❌ الفريق غير مطابق",
+            `الفريق خاصو يكون **${match.team1}** أو **${match.team2}**.`
+          )
+        );
+      }
+
+      let mvpAmount;
+
+      if (match.result === "draw") {
+        mvpAmount = 30000;
+      } else if (
+        (match.result === "team1" && teamKey === team1Key) ||
+        (match.result === "team2" && teamKey === team2Key)
+      ) {
+        mvpAmount = 50000;
+      } else {
+        mvpAmount = 20000;
+      }
+
+      const player = getPlayer(playerName);
+
+      player.balance += mvpAmount;
+
+      match.mvpPaid = true;
+      match.mvpPlayer = player.name;
+      match.mvpTeam = teamName;
+      match.mvpAmount = mvpAmount;
+
+      recordTransaction(
+        "match-mvp",
+        `${match.name}: ${player.name}`,
+        mvpAmount
+      );
+
+      saveDatabase();
+
+      return replyEmbed(
+        interaction,
+        makeEmbed(
+          "⭐ تم تحديد أفضل لاعب",
+          `المباراة: **${match.name}**\n` +
+          `اللاعب: **${player.name}**\n` +
+          `الفريق: **${teamName}**\n` +
+          `مكافأة MVP: **${money(mvpAmount)}**\n` +
+          `الرصيد الجديد: **${money(player.balance)}**`,
+          COLORS.green
+        )
+      );
+    }
+
+    // ---------- TEAM BALANCE ----------
+
+    if (command === "team-balance") {
+      const name = interaction.options.getString("team");
+      const team = db.teams[normalize(name)];
+
+      if (!team) {
+        return replyEmbed(
+          interaction,
+          makeEmbed(
+            "🏆 الفريق غير موجود",
+            "مازال ما تسجلش رصيد هذا الفريق."
+          )
+        );
+      }
+
+      return replyEmbed(
+        interaction,
+        makeEmbed(
+          "🏆 رصيد الفريق",
+          `الفريق: **${team.name}**\n` +
+          `الرئيس: **${team.president}**\n` +
+          `الرصيد: **${money(team.balance)}**`
+        ),
+        false
+      );
+    }
+
+    // ---------- PLAYER BALANCE ----------
+
+    if (command === "player-balance") {
+      const name = interaction.options.getString("player");
+      const player = db.players[normalize(name)];
+
+      if (!player) {
+        return replyEmbed(
+          interaction,
+          makeEmbed(
+            "👤 اللاعب غير موجود",
+            "مازال ما تسجلش رصيد هذا اللاعب."
+          )
+        );
+      }
+
+      return replyEmbed(
+        interaction,
+        makeEmbed(
+          "👤 رصيد اللاعب",
+          `اللاعب: **${player.name}**\n` +
+          `الرصيد: **${money(player.balance)}**`
+        ),
+        false
+      );
+    }
+
+    // ---------- COMPANY BALANCE ----------
+
+    if (command === "company-balance") {
+      const name = interaction.options.getString("company");
+      const company = getCompany(name);
+
+      if (!company) {
+        return replyEmbed(
+          interaction,
+          makeEmbed(
+            "🏢 الشركة غير موجودة",
+            "تأكد من اسم الشركة."
+          )
+        );
+      }
+
+      accrueCompanyProfit(company);
+      saveDatabase();
+
+      return replyEmbed(
+        interaction,
+        makeEmbed(
+          "🏢 رصيد الشركة",
+          `الشركة: **${company.name}**\n` +
+          `المالك: **${company.owner}**\n` +
+          `الرصيد: **${money(company.balance)}**\n` +
+          `الربح اليومي: **${money(company.dailyProfit)}**\n` +
+          `أقصى رعاية: **${money(company.maxSponsorship)}**`
+        ),
+        false
+      );
+    }
+
+    // ---------- MATCH REWARD RULES ----------
+
+    if (command === "rewards-match") {
+      return replyEmbed(
+        interaction,
+        makeEmbed(
+          "⚽ قوانين مكافآت المباريات",
+          "**🏆 الفريق الفائز:** $100,000\n" +
+          "**🤝 كل فريق في حالة التعادل:** $50,000\n" +
+          "**❌ الفريق الخاسر:** $0\n\n" +
+          "**⭐ مكافأة أفضل لاعب (MVP):**\n" +
+          "الفوز: $50,000\n" +
+          "التعادل: $30,000\n" +
+          "الخسارة: $20,000\n\n" +
+          "لا توجد مكافآت إضافية على الأهداف."
+        ),
+        false
+      );
+    }
+
   } catch (error) {
-    console.error(`Command error (${interaction.commandName}):`, error);
+    console.error(`Error in /${command}:`, error);
 
-    const reply = {
-      content: "❌ وقع خطأ أثناء تنفيذ الأمر. راجع إعدادات البوت والبيانات.",
-      ephemeral: true
-    };
+    const embed = makeEmbed(
+      "❌ وقع خطأ",
+      "وقع مشكل أثناء تنفيذ الأمر. راجع Console لمعرفة التفاصيل."
+    );
 
-    if (interaction.replied || interaction.deferred) {
-      await interaction.followUp(reply).catch(() => {});
-    } else {
-      await interaction.reply(reply).catch(() => {});
+    try {
+      await replyEmbed(interaction, embed);
+    } catch (replyError) {
+      console.error("Could not send error response:", replyError);
     }
   }
 });
+
+// ==================== PROCESS ERRORS ====================
 
 process.on("unhandledRejection", error => {
   console.error("Unhandled rejection:", error);
 });
 
+process.on("uncaughtException", error => {
+  console.error("Uncaught exception:", error);
+});
+
+// ==================== START BOT ====================
+
 client.login(TOKEN);
+                                  
